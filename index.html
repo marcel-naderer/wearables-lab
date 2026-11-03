@@ -827,7 +827,7 @@ function vibFigUpdate(v, time){
   if ($s('vibCalcV')){ $s('vibCalcPwm').textContent = v.pwm; $s('vibCalcV').textContent = `${num(VCC*duty,2)} V`; }
 }
 
-/* ---------- PPG measuring positions (MAX30102 Circuit tab) ---------- */
+/* ---------- PPG measuring positions (MAX30100 Circuit tab) ---------- */
 function ppgPosSVG(){
   const en = lang === 'en', G = '#43a047', O = '#ffb020', S = '#e8b796', SS = '#c99a7c';
   const pt = (x, y, c, n, lx, ly, a='start') => `<circle cx="${x}" cy="${y}" r="9" fill="${c}" stroke="#fff" stroke-width="2"/><text x="${x}" y="${y+4}" text-anchor="middle" class="pn">${n}</text><text x="${lx}" y="${ly}" class="pl" text-anchor="${a}">${['', en?'fingertip':'Fingerkuppe', en?'earlobe':'Ohrläppchen', en?'forehead':'Stirn', en?'wrist':'Handgelenk', en?'upper arm':'Oberarm'][n]}</text>`;
@@ -1733,31 +1733,50 @@ void loop() {
     return (v, time) => { const k = v.uvi/11; sun.scale.setScalar(.45 + k*.75); halo.material.opacity = .15 + k*.75; uvHalo.material.opacity = k*.9; pl.intensity = k*1.4; rays.rotation.z = time*.3; rays.visible = k > .05; };
   } },
 
-/* ================= MAX30102 ================= */
+/* ================= MAX30100 ================= */
 { id:'max', group:'sensor', iface:'I2C', btn:{en:'Pulse oximeter',de:'Pulsoximeter'},
-  title:{en:'MAX30102 – Pulse Oximeter',de:'MAX30102 – Pulsoximeter'}, sub:{en:'Light through your finger shows every heartbeat',de:'Licht durch den Finger zeigt jeden Herzschlag'},
-  file:'max30102_read.ino', every:40, view:{t:[2,4,0], d:.95}, plotLabels:['IR'],
+  title:{en:'MAX30100 – Pulse Oximeter',de:'MAX30100 – Pulsoximeter'}, sub:{en:'Light through your finger shows every heartbeat',de:'Licht durch den Finger zeigt jeden Herzschlag'},
+  file:'max30100_read.ino', every:40, view:{t:[2,4,0], d:.95}, plotLabels:['IR'],
   controls:[{k:'finger',type:'toggle',label:{en:'Finger on the sensor',de:'Finger auf dem Sensor'}},
             {k:'hr',type:'range',min:45,max:160,step:1,unit:'bpm',label:{en:'Heart rate',de:'Herzfrequenz'}}],
   ph:0, lastT:null,
   wave(ph){ const f = ph % 1; const gs = (x,m,s) => Math.exp(-((x-m)**2)/(2*s*s)); return gs(f,.14,.05) + .32*gs(f,.42,.06); },
   sample(v, time){ if (this.lastT === null) this.lastT = time; this.ph += (time - this.lastT)*v.hr/60; this.lastT = time;
-    const ir = v.finger ? Math.round(112000 - 900*this.wave(this.ph) + 300*Math.sin(time*1.4) + rnd(35)) : Math.round(1200 + rnd(160));
+    const ir = v.finger ? Math.round(42000 - 340*this.wave(this.ph) + 110*Math.sin(time*1.4) + rnd(15)) : Math.round(1200 + rnd(160));
     return {print:String(ir), plot:[ir], big:String(ir), small: v.finger ? `♥ ${v.hr} bpm · ${lang==='en'?'pulse = small ripple':'Puls = kleine Welle'}` : (lang==='en'?'no finger – only ambient light':'kein Finger – nur Umgebungslicht')}; },
-  code:v=>`// MAX30102 – read the raw infrared (IR) value
-#include <MAX30105.h>           // library: "SparkFun MAX3010x"
+  code:v=>`// MAX30100 – read the raw infrared (IR) value
+#include <MAX30100.h>           // library: "MAX30100lib"
 
-MAX30105 sensor;                // also works for MAX30102
+MAX30100 sensor;
+uint16_t ir = 0, red = 0;
+unsigned long lastPrint = 0, lastSample = 0;
 
 void setup() {
   Serial.begin(115200);
-  sensor.begin();               // I²C address 0x57
-  sensor.setup();               // default settings, LEDs on
+  delay(2000);                  // time for USB serial
+
+  if (!sensor.begin()) {        // I²C address 0x57
+    Serial.println("Sensor not found!");
+    while (true) delay(1000);
+  }
+  sensor.setMode(MAX30100_MODE_SPO2_HR);
+  sensor.setLedsCurrent(MAX30100_LED_CURR_7_6MA, MAX30100_LED_CURR_27_1MA);
+  sensor.resetFifo();           // clear old samples
 }
 
 void loop() {
-  Serial.println(sensor.getIR());
-  delay(20);
+  sensor.update();              // call often, no delay()
+  while (sensor.getRawValues(&ir, &red)) lastSample = millis();
+
+  unsigned long now = millis();
+  if (now - lastPrint >= 40) {  // print slowly, keep loop() fast
+    lastPrint = now;
+    Serial.println(ir);
+  }
+  if (now - lastSample >= 200) { // full FIFO looks empty: restart it
+    sensor.resetFifo();
+    lastSample = now;
+  }
 }`,
   conns:'i2c', i2cPins:['VIN','GND','SDA','SCL'],
   circuit(v){ const en = lang==='en'; return `
@@ -1774,16 +1793,16 @@ void loop() {
     <h3>${t('calc')} <span style="font-size:12px;color:var(--muted)">(${t('live')})</span></h3>
     <div class="calc">${en?'heart rate':'Herzfrequenz'} = 60 s / ${en?'time between two peaks':'Zeit zwischen zwei Spitzen'}<br>60 s / ${num(60/v.hr,2)} s = <span class="res">${v.hr} bpm</span></div>
     ${tipBox(en ? 'Switch the Serial Monitor to <b>Plotter</b> – you will see the heartbeat. Press the finger <b>gently</b> and keep still; pressing hard squeezes the blood out.' : 'Schalte den seriellen Monitor auf <b>Plotter</b> – dann siehst du den Herzschlag. Finger <b>sanft</b> auflegen und still halten; fest drücken presst das Blut raus.')}
-    ${warnBox(en ? 'Some cheap GY-MAX30102 boards pull SDA/SCL up to only 1.8 V. If the sensor is not found, check the board and the pin order printed on it.' : 'Manche günstige GY-MAX30102-Boards ziehen SDA/SCL nur auf 1,8 V hoch. Wird der Sensor nicht gefunden, prüf das Board und die aufgedruckte Pin-Reihenfolge.')}`; },
-  ds:{part:'GY-MAX30102 breakout (MAX30102, Analog Devices / Maxim)', search:'"MAX30102 datasheet"',
-    rows:[[{en:'Board supply (VIN)',de:'Board-Versorgung (VIN)'},'3.3 – 5 V',{en:'Board seller description',de:'Beschreibung des Händlers'}],
+    ${warnBox(en ? 'Some cheap GY-MAX30100 boards pull SDA/SCL up to only 1.8 V. If the sensor is not found, check the board and the pin order printed on it.' : 'Manche günstige GY-MAX30100-Boards ziehen SDA/SCL nur auf 1,8 V hoch. Wird der Sensor nicht gefunden, prüf das Board und die aufgedruckte Pin-Reihenfolge.')}`; },
+  ds:{part:'GY-MAX30100 breakout (MAX30100, Analog Devices / Maxim)', search:'"MAX30100 datasheet"',
+    rows:[[{en:'Board supply (VIN)',de:'Board-Versorgung (VIN)'},'3.3 V',{en:'XIAO 3V3 pin – seller specs vary',de:'XIAO-Pin 3V3 – Händlerangaben variieren'}],
           [{en:'Chip core supply',de:'Versorgung Chip-Kern'},'1.8 V',{en:'Electrical characteristics',de:'Elektrische Eigenschaften'}],
           [{en:'I²C address (7-bit)',de:'I²C-Adresse (7 Bit)'},'0x57',{en:'"I²C slave address"',de:'„I²C slave address“'}],
           [{en:'Red / IR LED wavelength',de:'Wellenlänge Rot / IR'},'660 / 880 nm',{en:'Optical characteristics',de:'Optische Kennwerte'}],
-          [{en:'ADC resolution',de:'ADC-Auflösung'},'18 bit',{en:'Features',de:'Features'}],
-          [{en:'Sample rate',de:'Abtastrate'},'50 – 3200 sps',{en:'SpO₂ configuration register',de:'SpO₂-Konfigurationsregister'}]]},
+          [{en:'ADC resolution',de:'ADC-Auflösung'},'13 – 16 bit',{en:'LED pulse width table',de:'Tabelle LED-Pulsbreite'}],
+          [{en:'Sample rate',de:'Abtastrate'},'50 – 1000 sps',{en:'SpO₂ configuration register',de:'SpO₂-Konfigurationsregister'}]]},
   build(g){
-    const bo = breakout(g, {pins:['VIN','SDA','SCL','INT','IRD','RD','GND'], col0:18, d:14, color:'#4b2477', title:'MAX30102', sub:'GY · pulse'});
+    const bo = breakout(g, {pins:['VIN','GND','SCL','SDA','INT'], col0:18, d:14, color:'#4b2477', title:'MAX30100', sub:'GY · pulse'});
     const sx = bo.cx + 2, sz = bo.zc - 1.5;
     box(5.6, 1.2, 3.3, M(0x161616), sx, bo.top + .6, sz, g);
     const winR = box(1.4, .15, 1.4, M(0x330000,{emissive:0xff1a1a, emissiveIntensity:0}), sx - 1.2, bo.top + 1.25, sz, g);
@@ -2092,8 +2111,8 @@ function renderStatic(){
   $('#serTitle').textContent = t('serial'); $('#clearBtn').textContent = t('clear');
   document.querySelectorAll('#serSeg button').forEach(b => { b.textContent = t(b.dataset.v === 'mon' ? 'monitor' : 'plotter'); b.classList.toggle('on', b.dataset.v === serView); });
   // parts bar
-  const grp = (g, label) => `<div class="pgroup pg-${g}"><div class="gl">${label}</div><div class="row">${PARTS.filter(p => p.group === g).map(p => `<button class="pbtn ${cur && cur.id === p.id ? 'on' : ''}" data-p="${p.id}"><span class="if" style="background:${ifColor(p.iface)}"></span>${L(p.btn)}</button>`).join('')}</div></div>`;
-  $('#partsbar').innerHTML = grp('sensor', t('sensors')) + grp('actuator', t('actuators')) + grp('power', t('power')) +
+  const grp = (g, label) => `<div class="pgroup pg-${g}"><div class="gl">${label}</div><div class="row">${PARTS.filter(p => p.group === g || (g === 'sensor' && p.group === 'power')).map(p => `<button class="pbtn ${cur && cur.id === p.id ? 'on' : ''}" data-p="${p.id}"><span class="if" style="background:${ifColor(p.iface)}"></span>${L(p.btn)}</button>`).join('')}</div></div>`;
+  $('#partsbar').innerHTML = grp('sensor', t('sensors')) + grp('actuator', t('actuators')) +
     '';
   $('#sideinfo').innerHTML = `<div class="legend"><span><i class="dot" style="background:${ifColor('Analog')}"></i>Analog</span><span><i class="dot" style="background:${ifColor('Digital')}"></i>Digital</span><span><i class="dot" style="background:${ifColor('I2C')}"></i>I²C</span><span><i class="dot" style="background:${ifColor('PWM')}"></i>PWM</span></div>
      <div class="credit">${lang === 'en' ? 'Designed by' : 'Erstellt von'} <b>Marcel Naderer</b></div>`;
@@ -2150,7 +2169,7 @@ let circTimer = null;
 function scheduleCircuit(){ if (tab !== 'circuit' || cur.id === 'fsr' || cur.id === 'led' || cur.id === 'vib' || (cur.id === 'btn' && !scheduleCircuit.force) || (cur.id === 'bat' && false)) return; clearTimeout(circTimer); circTimer = setTimeout(() => { const sc = $('#tabbody').scrollTop; renderTab(); $('#tabbody').scrollTop = sc; }, 120); }
 
 /* datasheet: only the few values a beginner needs (indices into ds.rows) */
-const DS_NAME = { btn:'Tactile switch 6×6 mm', bat:'LiPo 3.7 V', pot:'Potentiometer 10 kΩ', fsr:'FSR 402', gsr:'Grove GSR', imu:'MPU6050 (GY-521)', mcp:'MCP9808', bmp:'BMP581', ltr:'LTR390', max:'MAX30102', led:'5 mm LED', vib:'ROB-08449 + BC337' };
+const DS_NAME = { btn:'Tactile switch 6×6 mm', bat:'LiPo 3.7 V', pot:'Potentiometer 10 kΩ', fsr:'FSR 402', gsr:'Grove GSR', imu:'MPU6050 (GY-521)', mcp:'MCP9808', bmp:'BMP581', ltr:'LTR390', max:'MAX30100', led:'5 mm LED', vib:'ROB-08449 + BC337' };
 const DS_KEEP = { btn:[0,1,2], bat:[0,1,2,3], pot:[0,4], fsr:[1,2,5], gsr:[0,1], imu:[0,2,3], mcp:[0,1,4], bmp:[1,3,4], ltr:[1,2,3], max:[0,2], led:[0,1,2], vib:[1,3,6] };
 function renderTab(){
   const v = V[cur.id], body = $('#tabbody');
@@ -2178,7 +2197,7 @@ function hl(src){
     let code = line, com = ''; const ci = line.indexOf('//'); if (ci >= 0){ code = line.slice(0, ci); com = line.slice(ci); }
     let h;
     if (/^\s*#include/.test(code)) h = `<span class="pp">${esc(code)}</span>`;
-    else h = esc(code).replace(/("(?:[^"\\]|\\.)*")|(\b(?:void|int|float|const|if|return|bool|long|unsigned|uint8_t)\b)|(\b(?:Adafruit_\w+|BMP581|MAX30105|sensors_event_t|bmp5_sensor_data|Serial|Wire)\b)|(\b0x[0-9A-Fa-f]+\b|\b\d+(?:\.\d+)?\b)|(\b[A-Za-z_]\w*(?=\())/g,
+    else h = esc(code).replace(/("(?:[^"\\]|\\.)*")|(\b(?:void|int|float|const|if|return|bool|long|unsigned|uint8_t|uint16_t|while)\b)|(\b(?:Adafruit_\w+|BMP581|MAX30100|sensors_event_t|bmp5_sensor_data|Serial|Wire)\b)|(\b0x[0-9A-Fa-f]+\b|\b\d+(?:\.\d+)?\b)|(\b[A-Za-z_]\w*(?=\())/g,
       (m, s, k, ty, n, f) => s ? `<span class="s">${s}</span>` : k ? `<span class="k">${k}</span>` : ty ? `<span class="ty">${ty}</span>` : n ? `<span class="n">${n}</span>` : `<span class="f">${f}</span>`);
     h = h.replace(/«(.*?)»/g, '<span class="live">$1</span>');
     return `<span class="ln" data-n="${i+1}">${h}${com ? `<span class="c">${esc(com)}</span>` : ''}</span>`;
